@@ -1916,26 +1916,26 @@ Keywords are space-separated. Regex must be the final term.""")
         menu = QMenu(self)
 
         # 1. Open File
-        action_open_file = menu.addAction(QIcon.fromTheme("document-open"), _("Open File (Enter)"))
+        action_open_file = menu.addAction(QIcon.fromTheme("document-open-symbolic"), _("Open File (Enter)"))
         action_open_file.triggered.connect(self.open_file)
 
         # 2. Open Path
-        action_open_path = menu.addAction(QIcon.fromTheme("folder-open"), _("Open Folder (Ctrl+Enter)"))
+        action_open_path = menu.addAction(QIcon.fromTheme("folder-open-symbolic"), _("Open Folder (Ctrl+Enter)"))
         action_open_path.triggered.connect(self.open_path)
 
         # 3. Open in Terminal
-        action_open_terminal = menu.addAction(QIcon.fromTheme("utilities-terminal"),
+        action_open_terminal = menu.addAction(QIcon.fromTheme("utilities-terminal-symbolic"),
                                               _("Open Path in Terminal (Ctrl+Shift+T"))
         action_open_terminal.triggered.connect(self.open_in_terminal)
 
         menu.addSeparator()
 
         # 3. Copy File Name
-        action_copy_name = menu.addAction(QIcon.fromTheme("edit-copy"), _("Copy File Name"))
+        action_copy_name = menu.addAction(QIcon.fromTheme("edit-copy-symbolic"), _("Copy File Name"))
         action_copy_name.triggered.connect(self.copy_file_name)
 
         # 4. Copy Full Path (was "copy path" in request)
-        action_copy_path = menu.addAction(QIcon.fromTheme("edit-copy"), _("Copy Full Path"))
+        action_copy_path = menu.addAction(QIcon.fromTheme("edit-copy-symbolic"), _("Copy Full Path"))
         action_copy_path.triggered.connect(self.copy_full_path)
 
         # Shows the menu at the global mouse position
