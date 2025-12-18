@@ -14,7 +14,10 @@ from PyQt6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QVariant, QUrl,
     QRunnable, QThreadPool, pyqtSignal, QObject, QEvent, QTimer
 )
-from PyQt6.QtGui import QDesktopServices, QIcon, QAction, QGuiApplication
+from PyQt6.QtGui import (
+    QDesktopServices, QIcon, QAction, QGuiApplication, QShortcut,
+    QKeySequence
+)
 import os
 
 # Gettext configuration for internationalization
@@ -550,6 +553,7 @@ class FilterRunnable(QRunnable):
         full_filter_text = self.filter_params['full_filter_text']
         effective_category_regex = self.filter_params['effective_category_regex']
         case_insensitive_search = self.filter_params['case_insensitive_search']
+        exclude_mode = self.filter_params.get('exclude_mode', False)
         current_sort_column = self.sort_params['column']
 
         # 1. Tokenize and get original count
@@ -572,22 +576,31 @@ class FilterRunnable(QRunnable):
                 except re.error:
                     data_to_filter = []
 
-                    # --- SECTION 2: Text Keyword Filtering ---
-        filtered_results = []
-        if filter_keywords_list:
+        # --- SECTION 2: Text Keyword Filtering ---
+        # SAFETY CHECK: If the user cleared the filter text, we show EVERYTHING.
+        # This MUST skip all include/exclude logic to prevent empty tables.
+        if not filter_keywords_list:
+            filtered_results = data_to_filter
+        else:
+            filtered_results = []
             for name, path, is_dir in data_to_filter:
-                # NOTE: Assumes os is imported
                 full_path = os.path.join(path, name)
 
                 if case_insensitive_search:
                     full_path_cmp = full_path.lower()
-                    if all(token.lower() in full_path_cmp for token in filter_keywords_list):
+                    matches = all(token.lower() in full_path_cmp for token in filter_keywords_list)
+                else:
+                    matches = all(token in full_path for token in filter_keywords_list)
+
+                # Only apply mode logic if there is actual text
+                if exclude_mode:
+                    # In Exclude mode: add only if there is NO match
+                    if not matches:
                         filtered_results.append((name, path, is_dir))
                 else:
-                    if all(token in full_path for token in filter_keywords_list):
+                    # In Include mode: add only if there IS a match
+                    if matches:
                         filtered_results.append((name, path, is_dir))
-        else:
-            filtered_results = data_to_filter
 
         # 3. Emit the result back to the main thread
         self.signals.finished.emit(filtered_results, raw_count, current_sort_column)
@@ -837,6 +850,8 @@ class PlocateGUI(QWidget):
         self._last_plocate_term: str = ""
         # Live filter
         self.live_filter_enabled = True
+        # NEW: Filter mode (False = Include, True = Exclude)
+        self.filter_mode_exclude = False
         # NEW: Default database selection state
         self._current_db_selection = "both"
         # --- End Internal State ---
@@ -927,7 +942,7 @@ Keywords are space-separated. Regex must be the final term.""")
         self.db_menu_btn.setIcon(menu_icon)
         self.db_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.db_menu_btn.setToolTip(_("Select the search database (System, Media, Both)\n\nCTRL+SHIFT+D"))
-        self.db_menu_btn.setCursor(Qt.CursorShape.ArrowCursor)
+        self.db_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.db_menu_btn.setStyleSheet("""
             QToolButton {
                 /* Base styles for integration */
@@ -1032,28 +1047,59 @@ Keywords are space-separated. Regex must be the final term.""")
 
         # 1. Configure the Filter Input Field (self.filter_input)
         self.filter_input = QLineEdit()
-        self.filter_input.setPlaceholderText(_("Filter current results (in-memory)..."))
         self.filter_input.setToolTip(
-            _("Filters the visible results list. This does NOT re-run the plocate search.")
+            _("""Filters the result list. This does NOT re-run plocate search.
+
+[▼] Use the button on the left to change the filter mode.
+    - Include: Show only matching files.
+    - Exclude: Hide matching files.""")
         )
-        filter_icon = QIcon.fromTheme("view-filter")
-        filter_action = QAction(filter_icon, "", self.filter_input)
-        self.filter_input.addAction(filter_action, QLineEdit.ActionPosition.LeadingPosition)
+
+        # --- Include/Exclude Button with "view-filter" icon ---
+        self.filter_mode_btn = QToolButton()
+        self.filter_mode_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.filter_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # This CSS hides the arrow (menu-indicator) and removes borders
+        self.filter_mode_btn.setStyleSheet("""
+                    QToolButton { border: none; padding: 2px; background: transparent; }
+                    QToolButton::menu-indicator { image: none; }
+                """)
+
+        # Set the icon once
+        self.filter_mode_btn.setIcon(QIcon.fromTheme("view-filter"))
+
+        filter_mode_menu = QMenu(self)
+        self.action_filter_include = QAction(_("Show Matches (Include)"), self)
+        self.action_filter_exclude = QAction(_("Hide Matches (Exclude)"), self)
+
+        self.action_filter_include.setCheckable(True)
+        self.action_filter_exclude.setCheckable(True)
+        self.action_filter_include.setChecked(True)
+
+        self.action_filter_include.setIcon(QIcon.fromTheme("list-add-symbolic"))
+        self.action_filter_exclude.setIcon(QIcon.fromTheme("list-remove-symbolic"))
+
+        filter_mode_menu.addAction(self.action_filter_include)
+        filter_mode_menu.addAction(self.action_filter_exclude)
+        self.filter_mode_btn.setMenu(filter_mode_menu)
+
+        filter_mode_menu.triggered.connect(self.handle_filter_mode_change)
+
+        filter_mode_widget_action = QWidgetAction(self.filter_input)
+        filter_mode_widget_action.setDefaultWidget(self.filter_mode_btn)
+        self.filter_input.addAction(filter_mode_widget_action, QLineEdit.ActionPosition.LeadingPosition)
+
+        # Initial tooltip setup
+        self._update_filter_mode_icon()
+        # --- End Include/Exclude Button ---
+
         self.filter_input.setClearButtonEnabled(True)
 
-        # *** MODIFICATION: ADD FILTER INPUT SECOND ***
         filter_layout.addWidget(self.filter_input)
-
-        # >>> NEW CONDITIONAL CONNECTIONS <<<
-        # 1. Conditional connection: only filters if Live Filter is active
-        self.filter_input.textChanged.connect(self._schedule_in_memory_filter)
-        # 2. Connect the timer timeout to the filter function
-        self.filter_debounce_timer.timeout.connect(self._handle_filter_input_change)
-        # 3. Enter connection: always filters when Enter is pressed
+        self.filter_input.textChanged.connect(self._handle_filter_input_change)
         self.filter_input.returnPressed.connect(self._launch_filter_worker)
-
         main_layout.addLayout(filter_layout)
-        # --- END NEW FILTER BAR ---
 
         # Results table setup
         self.model = PlocateResultsModel()
@@ -1151,6 +1197,22 @@ Keywords are space-separated. Regex must be the final term.""")
 
         main_layout.addLayout(btn_layout)
 
+        # --- Robust Shortcuts for Filter Modes ---
+        # 1. Shortcut for INCLUDE (+)
+        self.shortcut_include_1 = QShortcut(QKeySequence("Ctrl+Shift++"), self)
+        self.shortcut_include_2 = QShortcut(QKeySequence("Ctrl++"), self)
+
+        self.shortcut_include_1.activated.connect(lambda: self.set_filter_mode(exclude=False))
+        self.shortcut_include_2.activated.connect(lambda: self.set_filter_mode(exclude=False))
+
+        # 2. Shortcut for EXCLUDE (-)
+        self.shortcut_exclude_1 = QShortcut(QKeySequence("Ctrl+Shift+-"), self)
+        self.shortcut_exclude_2 = QShortcut(QKeySequence("Ctrl+-"), self)
+
+        self.shortcut_exclude_1.activated.connect(lambda: self.set_filter_mode(exclude=True))
+        self.shortcut_exclude_2.activated.connect(lambda: self.set_filter_mode(exclude=True))
+
+        # IMPORTANT: Ensure the main layout is set to the window
         self.setLayout(main_layout)
         self.search_input.setFocus()
 
@@ -1175,6 +1237,50 @@ Keywords are space-separated. Regex must be the final term.""")
 
         # 4. Execute the search with the new configuration
         self.run_search()
+
+    def handle_filter_mode_change(self, action):
+        """Handles the switch between Include and Exclude filter modes."""
+        self.action_filter_include.setChecked(action == self.action_filter_include)
+        self.action_filter_exclude.setChecked(action == self.action_filter_exclude)
+
+        self.filter_mode_exclude = self.action_filter_exclude.isChecked()
+        self._update_filter_mode_icon()
+
+        # Trigger filter update if there is text
+        if self.filter_input.text():
+            self._launch_filter_worker()
+
+    def _update_filter_mode_icon(self):
+        """Updates the filter mode button icon, its tooltip, and the input placeholder."""
+
+        if self.filter_mode_exclude:
+            icon = QIcon.fromTheme("list-remove-symbolic", QIcon.fromTheme("list-remove"))
+            header = "[-] MODE: HIDE MATCHES (Exclude)"
+            current_status = "Currently hiding all files that match the filter text."
+            # Clear and technical placeholder for Exclude
+            placeholder = "Filter results to HIDE matches (in-memory)..."
+        else:
+            icon = QIcon.fromTheme("list-add-symbolic", QIcon.fromTheme("list-add"))
+            header = "[+] MODE: SHOW MATCHES (Include)"
+            current_status = "Currently showing only files that match the filter text."
+            # Clear and technical placeholder for Include
+            placeholder = "Filter results to SHOW matches (in-memory)..."
+
+        self.filter_mode_btn.setIcon(icon)
+        self.filter_input.setPlaceholderText(placeholder)
+
+        # Build the descriptive tooltip
+        tooltip_text = (
+            f"<b>{header}</b><br>"
+            f"<i>{current_status}</i><br><br>"
+            "Click to open menu or use shortcuts:<br><br>"
+            "• Filter Menu: <i>CTRL+SHIFT+M</i><br>"
+            "• Include Mode: <i>CTRL+SHIFT++</i><br>"
+            "• Exclude Mode: <i>CTRL+SHIFT+-</i><br><br>"
+            "<i>*Numpad +/- also supported with CTRL</i>"
+        )
+
+        self.filter_mode_btn.setToolTip(tooltip_text)
 
     # --- NEW METHOD: Get Database Modification Status ---
     def get_db_mod_date_status(self) -> str:
@@ -1487,12 +1593,10 @@ Keywords are space-separated. Regex must be the final term.""")
 
     def _launch_filter_worker(self):
         """
-        Gathers necessary parameters and launches the FilterRunnable in the thread pool.
-        This function is called by the debounce timer timeout or the Return key.
+        Launches the in-memory filter worker on the current raw results.
         """
-        raw_data = self._raw_plocate_results
-
         # 1. Early exit if no data or a worker is already running
+        raw_data = self._raw_plocate_results
         if not raw_data or self.filter_worker_running:
             if not raw_data:
                 # If there's no raw data, ensure the model is empty/clean
@@ -1512,12 +1616,13 @@ Keywords are space-separated. Regex must be the final term.""")
             combined_parts.append(main_search_text)
 
         # The combined text string used for tokenization
-        full_filter_text = " ".join(combined_parts).strip()
+        # full_filter_text = " ".join(combined_parts).strip()
+        full_filter_text = filter_text  # Use only the in-memory filter text so that an empty filter shows all results, regardless of include/exclude mode
 
         # Determine the effective category regex (this must stay in the main thread)
         filter_keywords_list, filter_shortcut_name = tokenize_search_query(full_filter_text)
-
         effective_category_regex = self.current_category_regex
+
         if filter_shortcut_name:
             selected_category_display_name = filter_shortcut_name
             effective_category_regex = get_category_regex(selected_category_display_name)
@@ -1533,6 +1638,7 @@ Keywords are space-separated. Regex must be the final term.""")
             'full_filter_text': full_filter_text,
             'effective_category_regex': effective_category_regex,
             'case_insensitive_search': self.case_insensitive_search,
+            'exclude_mode': self.filter_mode_exclude
         }
 
         sort_params = {
@@ -1543,8 +1649,8 @@ Keywords are space-separated. Regex must be the final term.""")
         # 3. Create, connect, and start the worker
         worker = FilterRunnable(raw_data, filter_params, sort_params)
         worker.signals.finished.connect(self._handle_filter_worker_finished)
-
         self.filter_worker_running = True
+
         # self.update_status_display(_("Filtering in background..."))
         self.threadpool.start(worker)
 
@@ -1586,11 +1692,10 @@ Keywords are space-separated. Regex must be the final term.""")
     def _handle_filter_input_change(self):
         """
         Conditional handler for filter_input.textChanged.
-        Runs the filter only if self.live_filter_enabled is True.
-        When False, the filter is only executed on pressing Enter (via returnPressed).
+        Runs the filter worker to update the view.
         """
-        if self.live_filter_enabled:
-            self._launch_filter_worker()
+        # The logic is now handled strictly in the worker.
+        self._launch_filter_worker()
 
     # --- NEW: Non-Blocking Search Runner (Replaces the original blocking logic) ---
     def set_ui_searching_state(self, is_searching: bool):
@@ -2094,8 +2199,35 @@ Keywords are space-separated. Regex must be the final term.""")
             event.accept()
             return
 
+        # 14. Handle Ctrl + Shift + M (Show Filter Mode Menu)
+        is_ctrl_shift_m = (key == Qt.Key.Key_M and
+                           (modifiers & Qt.KeyboardModifier.ControlModifier) and
+                           (modifiers & Qt.KeyboardModifier.ShiftModifier))
+
+        if is_ctrl_shift_m:
+            # Show the menu associated with the filter tool button
+            self.filter_mode_btn.showMenu()
+            event.accept()
+            return
+
         # Default behavior
         super().keyPressEvent(event)
+
+    def set_filter_mode(self, exclude):
+        """
+        Sets the filter mode (Include/Exclude), updates UI state,
+        tooltips, and re-runs the filter.
+        """
+        self.filter_mode_exclude = exclude
+        # Update menu actions state
+        self.action_filter_exclude.setChecked(exclude)
+        self.action_filter_include.setChecked(not exclude)
+
+        # Refresh the button icon and the new rich tooltip
+        self._update_filter_mode_icon()
+
+        # Trigger the filter logic immediately
+        self._launch_filter_worker()
 
     def eventFilter(self, source, event):
         """
