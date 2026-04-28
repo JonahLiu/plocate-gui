@@ -588,19 +588,23 @@ class FilterRunnable(QRunnable):
 
                 if case_insensitive_search:
                     full_path_cmp = full_path.lower()
-                    matches = all(token.lower() in full_path_cmp for token in filter_keywords_list)
+                    if exclude_mode:
+                        # Exclude: remove if ANY matches
+                        if not any(token.lower() in full_path_cmp for token in filter_keywords_list):
+                            filtered_results.append((name, path, is_dir))
+                    else:
+                        # Include: keep if ALL match
+                        if all(token.lower() in full_path_cmp for token in filter_keywords_list):
+                            filtered_results.append((name, path, is_dir))
                 else:
-                    matches = all(token in full_path for token in filter_keywords_list)
-
-                # Only apply mode logic if there is actual text
-                if exclude_mode:
-                    # In Exclude mode: add only if there is NO match
-                    if not matches:
-                        filtered_results.append((name, path, is_dir))
-                else:
-                    # In Include mode: add only if there IS a match
-                    if matches:
-                        filtered_results.append((name, path, is_dir))
+                    if exclude_mode:
+                        # Exclude: remove if ANY matches
+                        if not any(token in full_path for token in filter_keywords_list):
+                            filtered_results.append((name, path, is_dir))
+                    else:
+                        # Include: keep if ALL match
+                        if all(token in full_path for token in filter_keywords_list):
+                            filtered_results.append((name, path, is_dir))
 
         # 3. Emit the result back to the main thread
         self.signals.finished.emit(filtered_results, raw_count, current_sort_column)
