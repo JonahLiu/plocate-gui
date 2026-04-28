@@ -23,16 +23,20 @@ A simple GUI for the `plocate` command-line utility on Linux systems. Built with
 * **Keyboard Shortcuts:**
     * **Enter** / Double-click: Opens the selected file.
     * **Ctrl+Enter** / Double-click (Path Column): Opens the containing folder.
-    * **Ctrl+Shift+T**: Opens the containing folder in the **Terminal**.
-    * **Ctrl+F**: Moves focus to the Search input field.
-    * **Ctrl+G**: Moves focus to the Filter input field.
-    * **Ctrl+Tab**: Cycles focus between the Search and Filter input fields.
-    * **Ctrl+Shift+C**: Toggles Case Sensitivity.
-    * **Ctrl+Shift+L**: Toggles Live Filtering (auto-filter).
-    * **Ctrl+Shift+F**: Opens the Category Filter dropdown menu.
-    * **F5**: Executes the database update process (`updatedb`).
-    * **F1**: Opens the application's documentation/help.
-    * **Esc**: Cancels current search/update task, clears results, or closes the application.
+    * **Ctrl+Shift+T**: Open the containing folder in the **Terminal**.
+    * **Ctrl+Shift+D**: Select database (System, Media or both)
+    * **Ctrl+F**: Move focus to the Search input field.
+    * **Ctrl+G**: Move focus to the Filter input field.
+    * **Ctrl+Tab**: Cycle focus between the Search and Filter input fields.
+    * **Ctrl+Shift+C**: Toggle Case Sensitivity.
+    * **Ctrl+Shift+L**: Toggle Live Filtering (auto-filter).
+    * **Ctrl+Shift+F**: Open the Category Filter dropdown menu.
+    * **Ctrl+Shift+M**: Open the Filter menu.
+    * **Ctrl+Shift++**: Enable include mode in Filter menu
+    * **Ctrl+Shift+-**: Enable exclude mode in filter menu.
+    * **F5**: Execute the database update process (`updatedb`).
+    * **F1**: Open the application's documentation/help.
+    * **Esc**: Cancel current search/update task, clears results, or closes the application.
 
 ---
 ## Requirements
