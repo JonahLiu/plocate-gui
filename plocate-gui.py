@@ -934,7 +934,9 @@ Examples:
     - Category: ::doc final_report
     - Regex: "invoice 2024" .pdf$
 
-Keywords are space-separated. Regex must be the final term.""")
+Keywords are space-separated. Regex must be the final term.
+
+CTRL+F""")
         )
 
         # DATABASE SELECTOR AS LEADING ACTION <<<
@@ -1056,7 +1058,9 @@ Keywords are space-separated. Regex must be the final term.""")
 
 [▼] Use the button on the left to change the filter mode.
     - Include: Show only matching files.
-    - Exclude: Hide matching files.""")
+    - Exclude: Hide matching files.
+    
+CTRL+G""")
         )
 
         # --- Include/Exclude Button with "view-filter" icon ---
