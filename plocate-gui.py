@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QLineEdit, QPushButton,
     QTableView, QMessageBox, QHBoxLayout, QHeaderView, QLabel, QCheckBox,
     QMenu, QProgressBar, QComboBox, QDialog, QDialogButtonBox, QGroupBox,
-    QToolButton, QWidgetAction, QStyle
+    QToolButton, QWidgetAction, QStyle, QScrollArea
 )
 from PyQt6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QVariant, QUrl,
@@ -835,6 +835,156 @@ class UpdateDatabaseDialog(QDialog):
 
 # --- END OF CUSTOM DIALOG CLASS (Focus Optimized) ---
 
+class KeyboardShortcutsDialog(QDialog):
+    """A dialog displaying all keyboard shortcuts organized by category."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(_("Keyboard Shortcuts"))
+        self.setWindowIcon(QIcon.fromTheme("help-contents"))
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(500)
+
+        main_layout = QVBoxLayout(self)
+
+        # Header
+        header_label = QLabel(_("Keyboard Shortcuts - Plocate GUI"))
+        header_font = header_label.font()
+        header_font.setPointSize(header_font.pointSize() + 2)
+        header_font.setBold(True)
+        header_label.setFont(header_font)
+        main_layout.addWidget(header_label)
+
+        # Scrollable area for shortcuts
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+
+        # --- SEARCH SECTION ---
+        search_group = self._create_shortcut_group(
+            _("🔍 Search"),
+            [
+                (_("Ctrl+F"), _("Focus Search Input")),
+                (_("Ctrl+Shift+C"), _("Toggle Case Sensitivity")),
+                (_("Ctrl+Shift+D"), _("Select Database (System/Media/Both)")),
+                (_("Ctrl+Shift+F"), _("Open Category Filter")),
+            ]
+        )
+        scroll_layout.addWidget(search_group)
+
+        # --- IN-MEMORY FILTER SECTION ---
+        filter_group = self._create_shortcut_group(
+            _("🔎 In-Memory Filter"),
+            [
+                (_("Ctrl+G"), _("Focus Filter Input")),
+                (_("Ctrl+Shift+L"), _("Toggle Live Filter (AUTO/ENTER)")),
+                (_("Ctrl+Shift+M"), _("Show Filter Mode Menu")),
+                (_("Ctrl+Shift++"), _("Switch to Include Mode (Show Matches)")),
+                (_("Ctrl+Shift+-"), _("Switch to Exclude Mode (Hide Matches)")),
+            ]
+        )
+        scroll_layout.addWidget(filter_group)
+
+        # --- KEYBOARD NAVIGATION SECTION ---
+        navigation_group = self._create_shortcut_group(
+            _("📂 Navigation & Files"),
+            [
+                (_("Enter"), _("Open Selected File")),
+                (_("Ctrl+Enter"), _("Open Containing Folder")),
+                (_("Ctrl+Shift+T"), _("Open Path in Terminal")),
+            ]
+        )
+        scroll_layout.addWidget(navigation_group)
+
+        mouse_group = self._create_shortcut_group(
+            _("🖱️ Mouse Actions"),
+            [
+                (_("Double-Click (Name)"), _("Open File")),
+                (_("Double-Click (Path)"), _("Open Folder")),
+            ]
+        )
+        scroll_layout.addWidget(mouse_group)
+
+        # --- INTERFACE SECTION ---
+        interface_group = self._create_shortcut_group(
+            _("⚙️ Interface"),
+            [
+                (_("Ctrl+Tab"), _("Cycle Focus (Search ↔ Filter)")),
+                (_("Tab"), _("Navigate Between UI Elements")),
+                (_("Ctrl+Tab (in Table)"), _("Return to Search Input")),
+            ]
+        )
+        scroll_layout.addWidget(interface_group)
+
+        # --- UTILITIES SECTION ---
+        utilities_group = self._create_shortcut_group(
+            _("🛠️ Utilities"),
+            [
+                (_("F1"), _("Show This Help Dialog")),
+                (_("F5"), _("Update Database (updatedb)")),
+                (_("Esc"), _("Cancel Task / Clear Results / Exit")),
+            ]
+        )
+        scroll_layout.addWidget(utilities_group)
+
+        # Add stretch to push content to top
+        scroll_layout.addStretch()
+
+        scroll_area.setWidget(scroll_widget)
+        main_layout.addWidget(scroll_area)
+
+        # --- BUTTONS ---
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        visit_docs_btn = QPushButton(_("Open website"))
+        visit_docs_btn.setIcon(QIcon.fromTheme("web-browser"))
+        visit_docs_btn.clicked.connect(self.open_documentation)
+        button_layout.addWidget(visit_docs_btn)
+
+        close_btn = QPushButton(_("Close"))
+        close_btn.setIcon(QIcon.fromTheme("dialog-close"))
+        close_btn.clicked.connect(self.close)
+        button_layout.addWidget(close_btn)
+
+        main_layout.addLayout(button_layout)
+
+    def _create_shortcut_group(self, title: str, shortcuts: list[tuple[str, str]]) -> QGroupBox:
+        group = QGroupBox(title)
+
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(10, 10, 10, 10)
+        group_layout.setSpacing(8)
+
+        for shortcut_key, description in shortcuts:
+            row_layout = QHBoxLayout()
+            row_layout.setContentsMargins(5, 5, 5, 5)
+            row_layout.setSpacing(12)
+
+            shortcut_label = QLabel(shortcut_key)
+            shortcut_font = shortcut_label.font()
+            shortcut_font.setBold(True)
+            shortcut_label.setFont(shortcut_font)
+            shortcut_label.setMinimumWidth(140)
+            shortcut_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+            description_label = QLabel(description)
+            description_label.setWordWrap(True)
+            description_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+            row_layout.addWidget(shortcut_label, 0)
+            row_layout.addWidget(description_label, 1)
+
+            group_layout.addLayout(row_layout)
+
+        return group
+
+    def open_documentation(self):
+        """Opens the project documentation URL."""
+        DOC_URL = "https://github.com/dmnmsc/plocate-gui"
+        QDesktopServices.openUrl(QUrl(DOC_URL))
+
 
 class PlocateGUI(QWidget):
     def __init__(self):
@@ -1059,7 +1209,7 @@ CTRL+F""")
 [▼] Use the button on the left to change the filter mode.
     - Include: Show only matching files.
     - Exclude: Hide matching files.
-    
+
 CTRL+G""")
         )
 
@@ -1378,13 +1528,6 @@ CTRL+G""")
             # Update the button label and tooltip
             self.update_case_insensitive_text()
 
-            # 5. [BUG FIX]: REMOVE THE IN-MEMORY RE-FILTER CALL.
-            # The auto-toggle should only prepare the search, not trigger a re-filter.
-            # if text:
-            #    if self._raw_plocate_results:
-            #          In-memory re-filtering now respects the updated sensitivity
-            #        self._launch_filter_worker(rerun_plocate=False)
-
     def toggle_case_insensitive(self):
         """
         Toggles the case sensitivity mode and reapplies in-memory filtering
@@ -1428,9 +1571,9 @@ CTRL+G""")
             self.run_search()
 
     def open_documentation(self):
-        """Opens the project website/documentation in the system's default browser (F1 shortcut)."""
-        DOC_URL = "https://github.com/dmnmsc/plocate-gui"
-        QDesktopServices.openUrl(QUrl(DOC_URL))
+        """Opens the keyboard shortcuts dialog (F1 shortcut)."""
+        dialog = KeyboardShortcutsDialog(self)
+        dialog.exec()
 
     # --- STATUS LABEL UTILITY METHOD ---
     def update_status_display(self, text: str):
@@ -2406,7 +2549,7 @@ CTRL+G""")
         index_paths = [p.strip() for p in paths_to_index.split() if p.strip()]
 
         if not index_paths:
-            # Should not happen if dialog default is used, but safe guard.
+            # Should not happen if dialog default is used, but safeguard.
             QMessageBox.warning(self, _("Error"),
                                 _("No paths specified for media indexing. The media database update was skipped."))
             return
