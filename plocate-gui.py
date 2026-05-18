@@ -12,13 +12,15 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QVariant, QUrl,
-    QRunnable, QThreadPool, pyqtSignal, QObject, QEvent, QTimer
+    QRunnable, QThreadPool, pyqtSignal, QObject, QEvent, QTimer,
+    QSettings
 )
 from PyQt6.QtGui import (
     QDesktopServices, QIcon, QAction, QGuiApplication, QShortcut,
     QKeySequence
 )
 import os
+import ctypes
 
 # Gettext configuration for internationalization
 _ = gettext.gettext
@@ -27,6 +29,10 @@ _ = gettext.gettext
 DEFAULT_DB_PATH = "/var/lib/plocate/plocate.db"
 MEDIA_DB_PATH = "/var/lib/plocate/media.db"
 MEDIA_SCAN_PATH = "/run/media"
+
+# Search limits
+MIN_SEARCH_CHARS = 4  # Minimum characters before triggering a plocate search
+MAX_SEARCH_RESULTS = 99  # Default maximum results (overridable via UI dropdown)
 
 # MAPPING FOR CATEGORY SHORTCUTS IN SEARCH BAR (e.g., '::doc')
 # Key: User shortcut (without '::'). Value: Translatable category name.
@@ -276,6 +282,52 @@ def get_icon_for_file_type(filepath: str, is_dir: bool) -> QIcon:
     return QIcon.fromTheme("text-x-generic")
 
 
+# --- statx btime (creation time) helper ---
+_AT_FDCWD = -100
+_AT_STATX_SYNC_AS_STAT = 0x0000
+_STATX_BTIME = 0x0000_0800
+
+class _StatxTimestamp(ctypes.Structure):
+    _fields_ = [("tv_sec", ctypes.c_int64), ("tv_nsec", ctypes.c_uint32), ("__reserved", ctypes.c_int32)]
+
+class _StatxBuf(ctypes.Structure):
+    _fields_ = [
+        ("stx_mask", ctypes.c_uint32), ("stx_blksize", ctypes.c_uint32), ("stx_attributes", ctypes.c_uint64),
+        ("stx_nlink", ctypes.c_uint32), ("stx_uid", ctypes.c_uint32), ("stx_gid", ctypes.c_uint32),
+        ("stx_mode", ctypes.c_uint16), ("__spare0", ctypes.c_uint16),
+        ("stx_ino", ctypes.c_uint64), ("stx_size", ctypes.c_uint64), ("stx_blocks", ctypes.c_uint64),
+        ("stx_attributes_mask", ctypes.c_uint64),
+        ("stx_atime", _StatxTimestamp), ("stx_btime", _StatxTimestamp),
+        ("stx_ctime", _StatxTimestamp), ("stx_mtime", _StatxTimestamp),
+        ("stx_rdev_major", ctypes.c_uint32), ("stx_rdev_minor", ctypes.c_uint32),
+        ("stx_dev_major", ctypes.c_uint32), ("stx_dev_minor", ctypes.c_uint32),
+        ("stx_mnt_id", ctypes.c_uint64), ("__spare2", ctypes.c_uint64),
+        ("__spare3", ctypes.c_uint64 * 12),
+    ]
+
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    _libc.statx.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint, ctypes.POINTER(_StatxBuf))
+    _libc.statx.restype = ctypes.c_int
+    _STATX_AVAILABLE = True
+except Exception:
+    _STATX_AVAILABLE = False
+
+
+def _get_btime(path: str) -> str:
+    """Returns creation time as ISO string, or '—' if unavailable."""
+    if not _STATX_AVAILABLE:
+        return "—"
+    buf = _StatxBuf()
+    try:
+        ret = _libc.statx(_AT_FDCWD, path.encode(), _AT_STATX_SYNC_AS_STAT, _STATX_BTIME, ctypes.byref(buf))
+        if ret == 0 and (buf.stx_mask & _STATX_BTIME):
+            return datetime.datetime.fromtimestamp(buf.stx_btime.tv_sec).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        pass
+    return "—"
+
+
 # --- Stat Worker (for non-blocking os.stat) ---
 class StatSignals(QObject):
     """Defines signals available from a running worker thread."""
@@ -403,15 +455,15 @@ class SearchSignals(QObject):
 class SearchWorker(QRunnable):
     """Runnable that performs the plocate search and filtering in a separate thread."""
 
-    def __init__(self, plocate_term, post_plocate_filters, category_regex, case_insensitive, db_selection):
+    def __init__(self, keywords, category_regex, case_insensitive, db_selection, max_results):
         super().__init__()
-        self.plocate_term = plocate_term
-        self.post_plocate_filters = post_plocate_filters
+        self.keywords = keywords  # list of strings, each passed as a separate arg to plocate
         self.category_regex = category_regex
         self.case_insensitive = case_insensitive
-        self.db_selection = db_selection  # NEW: Store the selected database path/type
+        self.db_selection = db_selection
+        self.max_results = max_results
         self.signals = SearchSignals()
-        self._is_canceled = False  # Internal cancellation flag
+        self._is_canceled = False
 
     def cancel(self):
         """Sets the internal cancellation flag."""
@@ -421,7 +473,7 @@ class SearchWorker(QRunnable):
         """The main search and filtering logic."""
         try:
             # 1. Build and run the base plocate command
-            plocate_command = ["plocate"]
+            plocate_command = ["plocate", "-b"]
 
             # 1.1. Determine Case Insensitivity
             if self.case_insensitive:
@@ -431,20 +483,27 @@ class SearchWorker(QRunnable):
             db_selection = self.db_selection
 
             if db_selection == "both":
-                # To search in BOTH, we must explicitly combine the two paths with ':'
-                db_list = f"{DEFAULT_DB_PATH}:{MEDIA_DB_PATH}"
+                # Combine both paths, but skip media.db if it doesn't exist
+                if os.path.exists(MEDIA_DB_PATH):
+                    db_list = f"{DEFAULT_DB_PATH}:{MEDIA_DB_PATH}"
+                else:
+                    db_list = DEFAULT_DB_PATH
                 plocate_command.extend(["--database", db_list])
             elif db_selection:
                 # If a specific path is selected (System or Media only), use --database
                 plocate_command.extend(["--database", db_selection])
                 # NOTE: If db_selection is empty/None, no argument is added (falls back to plocate default).
 
-                # 1.3. Add the search term
-            plocate_command.append(self.plocate_term)
+            # 1.3. Limit results at the plocate level for early termination
+            plocate_command.extend(["--limit", str(self.max_results)])
+
+            # 1.4. Add search keywords as separate arguments (plocate AND semantics)
+            for kw in self.keywords:
+                plocate_command.append(kw)
 
             # Execute plocate (this is the potentially long-running blocking call)
             result = subprocess.run(
-                plocate_command, text=True, capture_output=True, check=False, timeout=120  # Added timeout
+                plocate_command, text=True, capture_output=True, check=False, timeout=120
             )
 
             # Check for cancellation *after* plocate finishes
@@ -463,6 +522,9 @@ class SearchWorker(QRunnable):
                     self.signals.finished.emit([], _("Error executing plocate:\n") + error_message, False)
                     return
 
+            # Limit results to avoid overwhelming the UI and background processing
+            files = files[:self.max_results]
+
             # 2. Category Filtering Logic
             if self.category_regex is not None:
                 if self.category_regex == "FILTER_BY_IS_DIR_TYPE":
@@ -476,24 +538,7 @@ class SearchWorker(QRunnable):
                 self.signals.finished.emit([], _("Search cancelled."), False)
                 return
 
-            # 3. Post-Plocate Multi-Keyword/Regex Filtering Logic
-            if self.post_plocate_filters:
-                if len(self.post_plocate_filters) > 1:
-                    escaped_keywords = [re.escape(k) for k in self.post_plocate_filters]
-                    lookahead_assertions = "".join(f"(?=.*{k})" for k in escaped_keywords)
-                    final_filter_pattern = f"^{lookahead_assertions}.*$"
-                else:
-                    final_filter_pattern = self.post_plocate_filters[0]
-
-                regex = re.compile(final_filter_pattern, re.IGNORECASE if self.case_insensitive else 0)
-                files = [f for f in files if regex.search(f)]
-
-            # Check for cancellation
-            if self._is_canceled:
-                self.signals.finished.emit([], _("Search cancelled."), False)
-                return
-
-            # 4. Prepare display data
+            # 3. Prepare display data (plocate already handled keyword AND semantics)
             display_rows = []
             for filepath in files:
                 filepath = filepath.strip()
@@ -558,7 +603,7 @@ class FilterRunnable(QRunnable):
 
         # 1. Tokenize and get original count
         # NOTE: Assumes tokenize_search_query is available globally/imported
-        filter_keywords_list, _ = tokenize_search_query(full_filter_text)
+        filter_keywords_list, _category = tokenize_search_query(full_filter_text)
         data_to_filter = self.raw_data
         raw_count = len(self.raw_data)
 
@@ -614,16 +659,24 @@ class FilterRunnable(QRunnable):
 class PlocateResultsModel(QAbstractTableModel):
     """Data model for QTableView storing plocate results."""
 
-    def __init__(self, data=None, parent=None):
+    # NEW: Signal to request async stat from the GUI thread
+    _request_stat = pyqtSignal(str, int)
+
+    def __init__(self, data=None, parent=None, view=None):
         super().__init__(parent)
         # Data format: (name, path, is_dir)
         self._data = data if data is not None else []
-        self._headers = [_("Name"), _("Path")]
+        self._headers = [_("Name"), _("Path"), _("Size"), _("Modified"), _("Created")]
+        # NEW: View reference for lazy viewport checks
+        self._view = view
+        # NEW: stat cache: {full_path: (size_str, mtime_str, btime_str)}
+        self._stat_data = {}
 
     def set_data(self, data):
         """Replaces the model data and notifies the view."""
         self.beginResetModel()
         self._data = data
+        self._stat_data.clear()  # NEW: clear stat cache on new data
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
@@ -647,18 +700,46 @@ class PlocateResultsModel(QAbstractTableModel):
 
         # Unpack the three elements: (name, path, is_dir)
         name, path, is_dir = self._data[row]
+        full_path = os.path.join(path, name)
+
+        # NEW: Handle Size (col 2), Modified (col 3), Created (col 4)
+        if col >= 2:
+            if role == Qt.ItemDataRole.DisplayRole:
+                # --- LAZY: only stat if row is visible in viewport ---
+                if self._view is not None:
+                    rect = self._view.visualRect(index)
+                    viewport_rect = self._view.viewport().rect()
+                    if rect is not None and viewport_rect is not None:
+                        if not rect.intersects(viewport_rect):
+                            return "…"  # not visible, don't stat yet
+
+                stat_info = self._stat_data.get(full_path)
+                if stat_info is None:
+                    # Trigger async stat
+                    self._request_stat.emit(full_path, row)
+                    return "…"
+
+                if col == 2:
+                    return stat_info[0]  # size
+                elif col == 3:
+                    return stat_info[1]  # mtime
+                else:
+                    return stat_info[2]  # btime
+            elif role == Qt.ItemDataRole.TextAlignmentRole:
+                if col == 2:
+                    return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            return QVariant()
 
         # 1. Display/Edit Role (Text)
         if role == Qt.ItemDataRole.DisplayRole or role == Qt.ItemDataRole.EditRole:
             if col == 0:
                 return name
-            else:
+            elif col == 1:
                 return path
 
         # 2. Decoration Role (Icon) - Only for the 'Name' column
         if role == Qt.ItemDataRole.DecorationRole and col == 0:
             # Note: We pass the joined path and is_dir to get the correct icon
-            full_path = os.path.join(path, name)
             return get_icon_for_file_type(full_path, is_dir)
 
         # 3. ToolTip Role (Specific logic for Name vs. Path)
@@ -686,16 +767,106 @@ class PlocateResultsModel(QAbstractTableModel):
         """Sorts the data by the specified column and order."""
         self.layoutAboutToBeChanged.emit()
 
-        # Sort the internal data list (case-insensitive for names and paths)
+        reverse = (order == Qt.SortOrder.DescendingOrder)
+
+        if column == 2:  # Size column
+            # Non-blocking: sort with whatever stats are available,
+            # and kick off background loading for the rest.
+            self._start_lazy_stat_loading()
+            def key_fn(row):
+                info = self._stat_data.get(os.path.join(row[1], row[0]))
+                if info and info[0] and info[0] != "—":
+                    return self._parse_size_bytes(info[0])
+                return -1  # unstat'd files at bottom
+        elif column == 3:  # Modified column
+            self._start_lazy_stat_loading()
+            def key_fn(row):
+                info = self._stat_data.get(os.path.join(row[1], row[0]))
+                if info and info[1] and info[1] != "—":
+                    return info[1]
+                return ""  # unstat'd files at bottom
+        elif column == 4:  # Created column
+            self._start_lazy_stat_loading()
+            def key_fn(row):
+                info = self._stat_data.get(os.path.join(row[1], row[0]))
+                if info and info[2] and info[2] != "—":
+                    return info[2]
+                return ""
+        else:
+            # Name (0) or Path (1)
+            key_fn = lambda x: str(x[column]).lower()
+
         try:
-            # Sort uses index 0 (Name) or index 1 (Path)
-            self._data.sort(key=lambda x: str(x[column]).lower(),
-                            reverse=(order == Qt.SortOrder.DescendingOrder))
+            self._data.sort(key=key_fn, reverse=reverse)
         except IndexError:
-            # Avoid errors if the column does not exist
             pass
 
         self.layoutChanged.emit()
+
+    def _start_lazy_stat_loading(self):
+        """Fire-and-forget: load all missing stats in the background via signal."""
+        paths = []
+        for name, path, is_dir in self._data:
+            full = os.path.join(path, name)
+            if full not in self._stat_data and not is_dir:
+                paths.append(full)
+
+        if not paths:
+            return
+
+        # Store the pending sort column so we can re-sort after all stats load
+        self._lazy_stat_queue = paths
+        self._lazy_stat_idx = 0
+        self._process_next_lazy_stat()
+
+    def _process_next_lazy_stat(self):
+        """Process one stat per call to avoid blocking the UI."""
+        if not hasattr(self, '_lazy_stat_queue'):
+            return
+        queue = self._lazy_stat_queue
+        idx = self._lazy_stat_idx
+        if idx >= len(queue):
+            del self._lazy_stat_queue
+            del self._lazy_stat_idx
+            # All stats loaded — re-trigger sort to reflect new data
+            # The view's sortIndicator tells us which column to re-sort
+            if self._view is not None:
+                header = self._view.horizontalHeader()
+                col = header.sortIndicatorSection()
+                order = header.sortIndicatorOrder()
+                if col >= 0:
+                    self.sort(col, order)
+                else:
+                    self.layoutChanged.emit()
+            else:
+                self.layoutChanged.emit()
+            return
+
+        full_path = queue[idx]
+        self._lazy_stat_idx = idx + 1
+
+        if full_path not in self._stat_data:
+            try:
+                s = os.stat(full_path)
+                self._stat_data[full_path] = (
+                    human_readable_size(s.st_size),
+                    datetime.datetime.fromtimestamp(s.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                    _get_btime(full_path)
+                )
+            except OSError:
+                self._stat_data[full_path] = ("—", "—", "—")
+
+        # Schedule the next one on the next event loop iteration
+        QTimer.singleShot(0, self._process_next_lazy_stat)
+
+    def _parse_size_bytes(self, size_str: str) -> int:
+        """Parses a human-readable size string back to bytes for sorting."""
+        units = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
+        try:
+            num_str, unit = size_str.split()
+            return int(float(num_str) * units.get(unit, 1))
+        except (ValueError, AttributeError):
+            return -1
 
 
 # --- CLASS: Custom Dialog for DB Update (Focus Optimized) ---
@@ -992,6 +1163,10 @@ class PlocateGUI(QWidget):
         self.setWindowTitle(_("Plocate GUI"))
         self.resize(800, 700)
 
+        # --- Settings persistence ---
+        self._settings = QSettings("plocate-gui", "plocate-gui")
+        self._columns_restored = False
+
         # --- Internal State for Preferences and Toggles ---
         self.case_insensitive_search = True
         # NEW: Flag to track manual case-sensitive setting from the button
@@ -1008,6 +1183,12 @@ class PlocateGUI(QWidget):
         self.filter_mode_exclude = False
         # NEW: Default database selection state
         self._current_db_selection = "both"
+        # NEW: Max results limit (synced with combo box)
+        self._max_results = MAX_SEARCH_RESULTS
+        # NEW: Flag for Enter-triggered full search (no limit, default sort)
+        self._enter_search_pending = False
+        # NEW: Guard against full-search timer feedback loop
+        self._full_search_running = False
         # --- End Internal State ---
 
         # Initialize ThreadPool for non-blocking operations
@@ -1021,15 +1202,6 @@ class PlocateGUI(QWidget):
         # Flag to prevent launching multiple filter workers simultaneously
         self.filter_worker_running = False
 
-        # Try to load the application icon from the system theme
-        icon = QIcon.fromTheme("plocate-gui")
-        if icon.isNull():
-            # Fallback for a generic search/file icon if the custom one is missing
-            icon = QIcon.fromTheme("system-search")
-
-        if not icon.isNull():
-            self.setWindowIcon(icon)
-
         self.RESPONSIVE_WIDTH_PERCENTAGE = 0.40
         self.MIN_NAME_WIDTH = 150
 
@@ -1041,6 +1213,19 @@ class PlocateGUI(QWidget):
         self.filter_debounce_timer.setSingleShot(True)
         # Set the delay to 200ms (adjust as needed, 150-300ms is typical)
         self.filter_debounce_timer.setInterval(200)
+
+        # NEW: Two-stage debounce timers for automatic search
+        #   Stage 1 (250ms idle) → limited search (quick preview)
+        #   Stage 2 (500ms idle) → full search (complete results)
+        self.search_debounce_timer = QTimer()
+        self.search_debounce_timer.setSingleShot(True)
+        self.search_debounce_timer.setInterval(250)
+        self.search_debounce_timer.timeout.connect(self._on_limited_search_timeout)
+
+        self.full_search_debounce_timer = QTimer()
+        self.full_search_debounce_timer.setSingleShot(True)
+        self.full_search_debounce_timer.setInterval(500)
+        self.full_search_debounce_timer.timeout.connect(self._on_full_search_timeout)
 
         self._initial_sizing_done = False
 
@@ -1148,11 +1333,11 @@ CTRL+F""")
         # 6. Add the widget action to the leading position (where the search icon was)
         self.search_input.addAction(db_widget_action, QLineEdit.ActionPosition.LeadingPosition)
 
-        # Connect search input to the new case logic
-        self.search_input.textChanged.connect(self.handle_input_case_change)
+        # Connect search input to the new case logic and debounced search
+        self.search_input.textChanged.connect(self._handle_search_input_change)
 
         # Connect to a dedicated search handler that starts the worker
-        self.search_input.returnPressed.connect(self.run_search)
+        self.search_input.returnPressed.connect(self._on_enter_search)
         self.search_input.setClearButtonEnabled(True)
 
         # Finally, add the single, configured search input to the layout
@@ -1263,6 +1448,10 @@ CTRL+G""")
         self.model = PlocateResultsModel()
         self.result_table = QTableView()
         self.result_table.setModel(self.model)
+        # NEW: Give model a reference to the view for lazy viewport checks
+        self.model._view = self.result_table
+        # NEW: Connect stat request signal to handler
+        self.model._request_stat.connect(self._handle_stat_request)
 
         self.result_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self.result_table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
@@ -1352,6 +1541,17 @@ CTRL+G""")
         self.open_in_terminal_btn.setToolTipDuration(1500)
         self.open_in_terminal_btn.clicked.connect(self.open_in_terminal)
         btn_layout.addWidget(self.open_in_terminal_btn)
+
+        # Max results dropdown (bottom-right corner)
+        btn_layout.addStretch()
+        max_label = QLabel(_("Max results:"))
+        btn_layout.addWidget(max_label)
+        self.max_results_combo = QComboBox()
+        self.max_results_combo.addItems(["99", "999", "9999"])
+        self.max_results_combo.setCurrentIndex(0)  # default 99
+        self.max_results_combo.setToolTip(_("Maximum number of search results to display"))
+        self.max_results_combo.currentIndexChanged.connect(self._on_max_results_changed)
+        btn_layout.addWidget(self.max_results_combo)
 
         main_layout.addLayout(btn_layout)
 
@@ -1528,10 +1728,79 @@ CTRL+G""")
             # Update the button label and tooltip
             self.update_case_insensitive_text()
 
+    def _handle_search_input_change(self, text: str):
+        """Handles text changes: auto-case detection + debounced search trigger."""
+        # 1. Existing case sensitivity logic
+        self.handle_input_case_change(text)
+
+        stripped = text.strip()
+
+        # 2. If no text, clear results and status immediately
+        if not stripped:
+            self.search_debounce_timer.stop()
+            self.full_search_debounce_timer.stop()
+            self._raw_plocate_results = []
+            self._last_plocate_term = ""
+            self.model.set_data([])
+            self.update_status_display(self.get_db_mod_date_status())
+            return
+
+        # 3. Enforce minimum search length to avoid overwhelming plocate
+        if len(stripped) < MIN_SEARCH_CHARS:
+            self.search_debounce_timer.stop()
+            self.full_search_debounce_timer.stop()
+            return
+
+        # 4. Incremental optimization: if the new query starts with (or equals) the
+        #    previous plocate term, filter in-memory from existing results instead of
+        #    re-running plocate. Only applies when category/db haven't changed.
+        if (self._last_plocate_term
+                and self._raw_plocate_results
+                and stripped.lower().startswith(self._last_plocate_term.lower())
+                and self.search_worker is None):
+            # Filter existing raw results with the new term as a substring filter
+            self._apply_incremental_filter(stripped)
+            return
+
+        # 5. Two-stage debounce: restart both timers on each keystroke.
+        #    250ms idle → limited search (quick preview)
+        #    500ms idle → full search (complete results)
+        self.search_debounce_timer.stop()
+        self.full_search_debounce_timer.stop()
+        self.search_debounce_timer.start()
+        self.full_search_debounce_timer.start()
+
+    def _apply_incremental_filter(self, query: str):
+        """Filters _raw_plocate_results in-memory using keyword AND semantics."""
+        self._last_plocate_term = query
+
+        # Split query into keywords (same as tokenize_search_query), then AND-match
+        # each keyword against the full path, matching plocate's space-separated semantics.
+        keywords, _category = tokenize_search_query(query)
+        if not keywords:
+            return
+
+        filtered = []
+        for name, path, is_dir in self._raw_plocate_results:
+            full = os.path.join(path, name)
+            target = full.lower() if self.case_insensitive_search else full
+            if all((kw.lower() if self.case_insensitive_search else kw) in target for kw in keywords):
+                filtered.append((name, path, is_dir))
+
+        # Store as if plocate returned this (limited to current max_results)
+        filtered = filtered[:self._max_results]
+        self._raw_plocate_results = filtered
+
+        if not filtered:
+            self.model.set_data([(_("No results found"), "", False)])
+            self.update_status_display(_("No results found"))
+        else:
+            self._launch_filter_worker()
+
     def toggle_case_insensitive(self):
         """
-        Toggles the case sensitivity mode and reapplies in-memory filtering
-        if results are already loaded, without re-running plocate.
+        Toggles the case sensitivity mode and re-runs plocate if needed,
+        since case-insensitive mode may produce additional results.
         """
         # The button's check state is already updated by the signal
         self.case_insensitive_search = not self.case_insensitive_btn.isChecked()
@@ -1542,33 +1811,31 @@ CTRL+G""")
         # Update dynamic text
         self.update_case_insensitive_text()
 
-        # If there are already loaded results, reapply the in-memory filter only
-        if self._raw_plocate_results:
-            self._launch_filter_worker()
-
-        # Otherwise, if there is search text but no results yet, run a full search
-        elif self.search_input.text().strip():
+        # Always re-run plocate when toggling case sensitivity with active search text,
+        # because the result set changes (Aa → aa adds results, aa → Aa removes some).
+        if self.search_input.text().strip():
             self.run_search()
 
     # Slot to handle category change
     def category_changed(self, index):
-        """Updates the internal state and handles filtering based on stored results."""
+        """Updates the internal state and re-runs plocate when category changes."""
         # The ComboBox returns the translated string, so we pass that to get_category_regex
         selected_category_display_name = self.category_combobox.currentText()
         self.current_category_regex = get_category_regex(selected_category_display_name)
 
-        # NEW BEHAVIOR: If raw results are already stored, we only apply the in-memory filter.
-        # This is faster as it avoids the subprocess.run(['plocate', ...]) call.
-        if self._raw_plocate_results:
-            # Rerunning plocate is set to False as we are only filtering existing data.
-            self._launch_filter_worker()
-
-            # Original behavior if no results are stored or the main search box has text.
-        elif self.search_input.text().strip():
-            # The search term is active, so we must rerun the search.
-            # NOTE: run_search is needed because the category filter is applied INSIDE
-            # the SearchWorker logic before storing in _raw_plocate_results.
+        # Always re-run plocate when category changes with active search text,
+        # because switching from a narrow category (e.g. Documents) to a broad one
+        # (e.g. All) needs additional results that can't be recovered from cache.
+        if self.search_input.text().strip():
             self.run_search()
+
+    def _on_max_results_changed(self, index: int):
+        """Updates the max results limit and re-runs the search if active."""
+        value = int(self.max_results_combo.currentText())
+        if value != self._max_results:
+            self._max_results = value
+            if self.search_input.text().strip():
+                self.run_search()
 
     def open_documentation(self):
         """Opens the keyboard shortcuts dialog (F1 shortcut)."""
@@ -1660,6 +1927,23 @@ CTRL+G""")
 
         self.update_status_display(status_text)
 
+    def _handle_stat_request(self, full_path: str, row: int):
+        """Handles lazy stat requests from the model. Non-blocking via StatWorker."""
+        worker = StatWorker(full_path)
+
+        def on_stat_done(path, size_str, mtime_str, success):
+            if success:
+                self.model._stat_data[path] = (size_str, mtime_str, _get_btime(path))
+            else:
+                self.model._stat_data[path] = ("—", "—", "—")
+            # Refresh the specific row's Size, Modified, Created columns
+            idx2 = self.model.index(row, 2)
+            idx4 = self.model.index(row, 4)
+            self.model.dataChanged.emit(idx2, idx4)
+
+        worker.signals.finished.connect(on_stat_done)
+        self.threadpool.start(worker)
+
     # ----------------------------------------------------
 
     def update_sort_state(self, logicalIndex):
@@ -1685,7 +1969,11 @@ CTRL+G""")
         """
         Adjusts the 'Name' column (index 0) to 40% of the table width
         on-the-fly, ensuring responsive behavior.
+        Only applies if user hasn't manually resized columns.
         """
+        if self._columns_restored:
+            return
+
         header = self.result_table.horizontalHeader()
         name_col_index = 0
 
@@ -1702,6 +1990,39 @@ CTRL+G""")
 
         # 3. Apply the size (this overrides manual sizing on every resize)
         header.resizeSection(name_col_index, final_width)
+
+    def showEvent(self, event):
+        """Restore window size and column widths on first show."""
+        super().showEvent(event)
+        if not self._columns_restored:
+            self._restore_window_state()
+
+    def closeEvent(self, event):
+        """Save window size and column widths before closing."""
+        self._save_window_state()
+        super().closeEvent(event)
+
+    def _save_window_state(self):
+        """Persist window size and column widths to QSettings."""
+        self._settings.setValue("window/width", self.width())
+        self._settings.setValue("window/height", self.height())
+        header = self.result_table.horizontalHeader()
+        for col in range(self.model.columnCount()):
+            self._settings.setValue(f"columns/width_{col}", header.sectionSize(col))
+        self._settings.sync()
+
+    def _restore_window_state(self):
+        """Restore window size and column widths from QSettings."""
+        w = self._settings.value("window/width")
+        h = self._settings.value("window/height")
+        if w is not None and h is not None:
+            self.resize(int(w), int(h))
+        header = self.result_table.horizontalHeader()
+        for col in range(self.model.columnCount()):
+            saved = self._settings.value(f"columns/width_{col}")
+            if saved is not None:
+                header.resizeSection(col, int(saved))
+        self._columns_restored = True
 
     def resizeEvent(self, event):
         """
@@ -1857,14 +2178,12 @@ CTRL+G""")
             return
 
         is_disabled = is_searching
-        self.unified_update_btn.setDisabled(is_disabled)  # Disable update button
 
-        # Set search-specific controls based on search state
-        self.search_input.setDisabled(is_disabled)
+        # Disable auxiliary controls only - keep search_input and filter_input
+        # enabled so the user can continue typing and cancel/restart the search.
+        self.unified_update_btn.setDisabled(is_disabled)
         self.category_combobox.setDisabled(is_disabled)
         self.case_insensitive_btn.setDisabled(is_disabled)
-        self.filter_input.setDisabled(is_disabled)  # NEW: Disable in-memory filter during plocate search
-        # NEW: Disable database selector button during search
         self.db_menu_btn.setDisabled(is_disabled)
 
         if is_searching:
@@ -1920,30 +2239,59 @@ CTRL+G""")
             self.update_status_display(_("No results found"))
             return
 
-            # 2. Run the in-memory filter to populate the visible table.
-        # This also handles status messages for filtered results.
+        # 2. If Enter-triggered full search and no column is sorted, default to Modified desc
+        if self._enter_search_pending:
+            self._enter_search_pending = False
+            if self.current_sort_column < 0:
+                self.current_sort_column = 3
+                self.current_sort_order = Qt.SortOrder.DescendingOrder
+                self.result_table.horizontalHeader().setSortIndicator(
+                    self.current_sort_column, self.current_sort_order)
+
+        # 3. Run the in-memory filter to populate the visible table.
         self._launch_filter_worker()
 
-        # Move focus to the table header instead of the table itself.
-        # This avoids the automatic selection of the first row when results are present.
-        self.result_table.horizontalHeader().setFocus()
+        # If this was a limited search and user hasn't started typing again,
+        # restart the full-search timer for another 250ms of idle grace.
+        if not self._full_search_running:
+            self.full_search_debounce_timer.stop()
+            self.full_search_debounce_timer.start()
+        self._full_search_running = False
 
-    def run_search(self):
+    def _on_limited_search_timeout(self):
+        """250ms idle: run limited search for quick preview."""
+        self.run_search(use_limit=True)
+
+    def _on_full_search_timeout(self):
+        """500ms idle: run full search for complete results."""
+        self._full_search_running = True
+        self.run_search(use_limit=False)
+
+    def _on_enter_search(self):
+        """Enter key: full search without limit, sorted by Modified desc by default."""
+        self._enter_search_pending = True
+        self._full_search_running = True
+        self.run_search(use_limit=False)
+
+    def run_search(self, use_limit: bool = True):
         """
         Parses the query and launches the non-blocking SearchWorker.
-        Replaces the original blocking run_search method logic.
+        If use_limit is False (Enter key), searches without result limit.
         """
+        # Cancel any pending debounced search
+        self.search_debounce_timer.stop()
+        self.full_search_debounce_timer.stop()
+
         # Clear current selection to prevent 'Enter' from opening the previously selected file
         self.result_table.selectionModel().clearSelection()
 
         full_query = self.search_input.text().strip()
 
-        # Check if a search is already running
+        # Check if a search is already running - cancel it and proceed
         if self.search_worker is not None:
-            # Cancel the old one before starting a new one (or just return for simplicity)
-            # For simplicity, we just return if a search is in progress
-            # self.search_worker.cancel() # Could implement this, but we'll stick to a simple block for now
-            return
+            self.search_worker.signals.finished.disconnect(self.search_finished)
+            self.search_worker.cancel()
+            self.search_worker = None
 
         # Split the query into keywords, supporting quotes, and extract the category shortcut
         keywords, category_shortcut_name = tokenize_search_query(full_query)
@@ -1964,27 +2312,23 @@ CTRL+G""")
             if index != -1:
                 self.category_combobox.setCurrentIndex(index)
 
-        # 2. Determine the main plocate term and post-plocate filter terms
-        if keywords:
-            plocate_term = keywords[0]
-            post_plocate_filters = keywords[1:]
-        else:
-            plocate_term = "."  # Universal term when only a category shortcut is used
-            post_plocate_filters = []
+        # 2. Pass keywords directly to SearchWorker as separate plocate args
+        if not keywords:
+            keywords = ["."]  # Universal term when only a category shortcut is used
 
-        # The category regex comes from the current ComboBox state (set by category_changed or the shortcut block above)
         category_regex = self.current_category_regex
-
-        # --- UPDATED: GET DATABASE SELECTION FROM INTERNAL STATE ---
         db_selection = self._current_db_selection
+
+        # Use a large limit for full search, or the UI-configured limit
+        max_results = 999999 if not use_limit else self._max_results
 
         # 3. Create and launch the worker
         worker = SearchWorker(
-            plocate_term,
-            post_plocate_filters,
+            keywords,
             category_regex,
             self.case_insensitive_search,
-            db_selection  # PASS THE DATABASE SELECTION
+            db_selection,
+            max_results
         )
         self.search_worker = worker  # Store reference for cancellation
         worker.signals.finished.connect(self.search_finished)
@@ -2620,8 +2964,12 @@ if __name__ == "__main__":
     # Set the application name for system monitor/taskbar
     QApplication.setApplicationName("Plocate GUI")
     QApplication.setApplicationDisplayName("Plocate GUI")
-    QApplication.setDesktopFileName("Plocate GUI")
+    QApplication.setDesktopFileName("plocate-gui")
     app = QApplication(sys.argv)
+    # Set app icon (must be done before creating any widget for taskbar)
+    icon = QIcon.fromTheme("plocate-gui")
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     window = PlocateGUI()
     window.show()
     sys.exit(app.exec())

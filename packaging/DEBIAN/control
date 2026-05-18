@@ -1,0 +1,23 @@
+Package: plocate-gui
+Version: 0.2.0
+Architecture: all
+Section: utils
+Priority: optional
+Maintainer: plocate-gui developers
+Depends: python3 (>= 3.8),
+         python3-pyqt6,
+         plocate,
+         policykit-1,
+         libxcb-cursor0
+Description: Fast GUI file search using plocate
+ A PyQt6-based graphical interface for the plocate command-line utility.
+ Features include:
+  - Interactive search with debounced auto-completion
+  - Multi-keyword AND search matching plocate CLI semantics
+  - Category filtering by file type (Documents, Images, Video, etc.)
+  - Dual database support (system and external media)
+  - File metadata columns: Size, Modified time, Creation time
+  - Non-blocking database updates via pkexec
+  - Keyboard shortcuts for common operations
+  - Configurable result limits
+Homepage: https://github.com/dmnmsc/plocate-gui
