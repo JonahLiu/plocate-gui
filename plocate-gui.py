@@ -725,9 +725,24 @@ class PlocateResultsModel(QAbstractTableModel):
                     return stat_info[1]  # mtime
                 else:
                     return stat_info[2]  # btime
+
+            elif role == Qt.ItemDataRole.ToolTipRole:
+                stat_info = self._stat_data.get(full_path)
+
+                if stat_info is None:
+                    return "Loading..."
+
+                if col == 2:
+                    return stat_info[0]  # size
+                elif col == 3:
+                    return stat_info[1]  # mtime
+                else:
+                    return stat_info[2]  # btime
+
             elif role == Qt.ItemDataRole.TextAlignmentRole:
                 if col == 2:
                     return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+
             return QVariant()
 
         # 1. Display/Edit Role (Text)
