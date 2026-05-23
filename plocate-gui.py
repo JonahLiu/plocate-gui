@@ -1098,6 +1098,7 @@ class KeyboardShortcutsDialog(QDialog):
             [
                 (_("Ctrl+Tab"), _("Cycle Focus (Search ↔ Filter)")),
                 (_("Tab"), _("Navigate Between UI Elements")),
+                (_("↓ Arrow"), _("Focus Results")),
                 (_("Ctrl+Tab (in Table)"), _("Return to Search Input")),
             ]
         )
