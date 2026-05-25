@@ -1,3 +1,7 @@
+> **Note:** This fork has been merged upstream.  
+> Active development continues at [dmnmsc/plocate-gui](https://github.com/dmnmsc/plocate-gui).  
+> Please open issues and PRs there.
+
 # Plocate GUI
 
 A simple GUI for the `plocate` command-line utility on Linux systems. Built with PyQt6.
