@@ -1,7 +1,5 @@
 # Plocate GUI
 
-> This fork is based on the original work by [dmnmsc](https://github.com/dmnmsc/plocate-gui).
-
 A simple GUI for the `plocate` command-line utility on Linux systems. Built with PyQt6.
 
 <div align="center">

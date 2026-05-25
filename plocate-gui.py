@@ -725,9 +725,24 @@ class PlocateResultsModel(QAbstractTableModel):
                     return stat_info[1]  # mtime
                 else:
                     return stat_info[2]  # btime
+
+            elif role == Qt.ItemDataRole.ToolTipRole:
+                stat_info = self._stat_data.get(full_path)
+
+                if stat_info is None:
+                    return "Loading..."
+
+                if col == 2:
+                    return stat_info[0]  # size
+                elif col == 3:
+                    return stat_info[1]  # mtime
+                else:
+                    return stat_info[2]  # btime
+
             elif role == Qt.ItemDataRole.TextAlignmentRole:
                 if col == 2:
                     return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+
             return QVariant()
 
         # 1. Display/Edit Role (Text)
@@ -1083,6 +1098,7 @@ class KeyboardShortcutsDialog(QDialog):
             [
                 (_("Ctrl+Tab"), _("Cycle Focus (Search ↔ Filter)")),
                 (_("Tab"), _("Navigate Between UI Elements")),
+                (_("↓ Arrow"), _("Focus Results")),
                 (_("Ctrl+Tab (in Table)"), _("Return to Search Input")),
             ]
         )
@@ -2639,7 +2655,28 @@ CTRL+G""")
             event.accept()
             return
 
-        # 9. Handle Ctrl + Tab (Cycle between search and filter inputs ONLY)
+        # NEW 9. Handle Down Arrow for result_table focus from inputs
+        elif key == Qt.Key.Key_Down:
+            is_input_focused = (
+                    self.search_input.hasFocus() or
+                    self.filter_input.hasFocus()
+            )
+
+            has_results = self.model.rowCount() > 0
+
+            if is_input_focused and has_results:
+
+                self.result_table.setFocus()
+
+                if not selected_rows:
+                    index = self.model.index(0, 0)
+                    self.result_table.setCurrentIndex(index)
+                    self.result_table.selectRow(0)
+
+                event.accept()
+                return
+
+        # 10. Handle Ctrl + Tab (Cycle between search and filter inputs ONLY)
         is_ctrl_tab = (key == Qt.Key.Key_Tab and (modifiers & Qt.KeyboardModifier.ControlModifier))
 
         if is_ctrl_tab:
@@ -2653,7 +2690,7 @@ CTRL+G""")
             event.accept()
             return
 
-        # 10. Handle Ctrl + Shift + C (Toggle Case Sensitive)
+        # 11. Handle Ctrl + Shift + C (Toggle Case Sensitive)
         is_ctrl_shift_c = (key == Qt.Key.Key_C and
                            (modifiers & Qt.KeyboardModifier.ControlModifier) and
                            (modifiers & Qt.KeyboardModifier.ShiftModifier))
@@ -2663,7 +2700,7 @@ CTRL+G""")
             event.accept()
             return
 
-        # 11. Handle Ctrl + Shift + D (Show Database Menu) - NEW SHORTCUT
+        # 12. Handle Ctrl + Shift + D (Show Database Menu) - NEW SHORTCUT
         is_ctrl_shift_d = (key == Qt.Key.Key_D and
                            (modifiers & Qt.KeyboardModifier.ControlModifier) and
                            (modifiers & Qt.KeyboardModifier.ShiftModifier))
@@ -2674,7 +2711,7 @@ CTRL+G""")
             event.accept()
             return
 
-        # 12. Handle Ctrl + Shift + L (Toggle Auto Filter)
+        # 13. Handle Ctrl + Shift + L (Toggle Auto Filter)
         is_ctrl_shift_l = (key == Qt.Key.Key_L and
                            (modifiers & Qt.KeyboardModifier.ControlModifier) and
                            (modifiers & Qt.KeyboardModifier.ShiftModifier))
@@ -2684,7 +2721,7 @@ CTRL+G""")
             event.accept()
             return
 
-        # 13. Handle Ctrl + Shift + F for category filter focus
+        # 14. Handle Ctrl + Shift + F for category filter focus
         is_ctrl_shift_f = (event.key() == Qt.Key.Key_F and
                            (event.modifiers() & Qt.KeyboardModifier.ControlModifier) and
                            (event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
@@ -2694,7 +2731,7 @@ CTRL+G""")
             event.accept()
             return
 
-        # 14. Handle Ctrl + Shift + M (Show Filter Mode Menu)
+        # 15. Handle Ctrl + Shift + M (Show Filter Mode Menu)
         is_ctrl_shift_m = (key == Qt.Key.Key_M and
                            (modifiers & Qt.KeyboardModifier.ControlModifier) and
                            (modifiers & Qt.KeyboardModifier.ShiftModifier))
